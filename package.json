@@ -1,0 +1,21 @@
+{
+  "name": "opencode-v2code-local",
+  "version": "0.2.2",
+  "private": true,
+  "type": "module",
+  "main": "./index.mjs",
+  "description": "Magpie provider plugin for V2code: account sign-in, API key selection, model routing and wallet balance.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sijinhui/magpie-v2code.git"
+  },
+  "files": ["index.mjs", "models.mjs", "browser-login.mjs", "README.md", "VALIDATION.md"],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:host": "node --test test/host.integration.mjs"
+  },
+  "magpie": {
+    "name": "V2code",
+    "icon": "https://www.v2code.ai/favicon.ico"
+  }
+}

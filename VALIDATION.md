@@ -1,4 +1,13 @@
-# 验证记录 · 2026-11-13
+# 验证记录
+
+## 2026-11-16 空响应排查
+
+- 新增 `test/model-response.test.mjs`，使用内存 Response 和虚构 Key，覆盖 UTF-8/JSON 分块、文本、纯工具输出、真实空完成、仅 completed 带文本、仅 reasoning、failed/incomplete、截断事件、上游 HTTP 502、请求预算/状态透传及取消不重试。
+- 这些用例只验证插件传输边界，不验证 Magpie 的 Messages → Responses → Messages 转换，也不能据此声称真实空响应已修复。
+- `node --check test/model-response.test.mjs` 与 `git diff --check` 通过。完整测试执行被本机自动审批以 `Code from External` 拒绝，新增用例尚未运行；本次没有真实模型生成或线上修复验证。
+- 排查发现同一输入在多个渠道的同一模型上均出现空响应；现有汇总日志不足以确定上游真实空 output 或宿主解析问题，后续需要脱敏上游终止事件佐证。没有改写模型响应或增加自动重试。
+
+## 2026-11-13 验证记录
 
 ## 自动测试
 

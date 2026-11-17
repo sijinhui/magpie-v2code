@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { modelDefaults } from './models.mjs';
 import { beginBrowserSignIn } from './browser-login.mjs';
 
@@ -10,7 +11,26 @@ const KEYS_URL = 'https://www.v2code.ai/api/v1/app_admin/token/list';
 const MAX_JSON_BYTES = 1024 * 1024;
 const MODEL_ID = /^(?:gpt-|claude-)[A-Za-z0-9][A-Za-z0-9._-]{0,190}$/;
 
-class ServiceError extends Error {}
+class ServiceError extends Error {
+  constructor(message, authRejected = false) {
+    super(message);
+    this.authRejected = authRejected;
+  }
+}
+
+// The saved website credentials are the only way to renew the web JWT. They
+// are optional (ticked on the local sign-in page) and never sent anywhere
+// except the website login URL.
+const RENEW_COOLDOWN_MS = 5 * 60 * 1000;
+const MAX_SESSIONS = 64;
+
+function renewalOf(metadata) {
+  const username = metadata?.webUsername;
+  const password = metadata?.webPassword;
+  if (typeof username !== 'string' || typeof password !== 'string') return undefined;
+  if (!username.trim() || username.length > 200 || !password || password.length > 4096) return undefined;
+  return { username: username.trim(), password };
+}
 
 function apiKey(auth) {
   if (auth?.type !== 'api' || typeof auth.key !== 'string' || !auth.key.trim()) {
@@ -53,7 +73,7 @@ function webSession(token, userId, now) {
   if (claims.exp * 1000 <= now) {
     throw new ServiceError('官网余额登录令牌已过期，请重新登录 V2code 插件；模型 Key 不受影响');
   }
-  return { token: value, userId: account };
+  return { token: value, userId: account, expires: claims.exp * 1000 };
 }
 
 function safeNumber(value, field) {
@@ -140,10 +160,11 @@ function keysOf(rows, now) {
 async function readJson(response, label) {
   if (!response.ok) {
     await response.body?.cancel();
-    const message = label === 'V2code 余额查询' && [401, 403].includes(response.status)
+    const rejected = label === 'V2code 余额查询' && [401, 403].includes(response.status);
+    const message = rejected
       ? '官网余额认证被拒绝，请重新登录 V2code 插件；模型 Key 不受影响'
       : `${label}失败（HTTP ${response.status}）`;
-    throw new ServiceError(message);
+    throw new ServiceError(message, rejected);
   }
   const reader = response.body?.getReader();
   if (!reader) throw new ServiceError(`${label}未返回数据`);
@@ -185,9 +206,7 @@ function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
     }
   }
 
-  async function readUsage(auth, signal) {
-    apiKey(auth);
-    const session = webSession(auth.metadata?.webToken, auth.metadata?.webUserId, now());
+  async function queryBalance(session, signal) {
     const result = await request(BALANCE_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: session.token, 'user-id': session.userId },
@@ -195,11 +214,77 @@ function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
     }, 'V2code 余额查询', signal);
     if (result?.status !== 0) {
       if (result?.status === 101) {
-        throw new ServiceError('官网余额认证失效，请重新登录 V2code 插件；模型 Key 不受影响');
+        throw new ServiceError('官网余额认证失效，请重新登录 V2code 插件；模型 Key 不受影响', true);
       }
       throw new ServiceError('V2code 官网拒绝余额查询，未将未知余额记为零');
     }
     return usageOf(result.data);
+  }
+
+  // Renewed web sessions live in memory only, keyed by a hash of the saved
+  // credentials, so changing the password or account never reuses an old one.
+  const renewed = new Map();
+  const renewing = new Map();
+  const renewFailed = new Map();
+  const credentialId = ({ username, password }) => createHash('sha256').update(`${username}\0${password}`).digest('hex');
+
+  function renewSession(credentials, signal) {
+    const id = credentialId(credentials);
+    const failed = renewFailed.get(id);
+    if (failed && failed.until > now()) throw new ServiceError(failed.message);
+    if (renewing.has(id)) return renewing.get(id);
+    const pending = (async () => {
+      try {
+        const data = await siteRequest(LOGIN_URL, credentials, null, 'V2code 账号登录', signal);
+        const session = webSession(data?.jwt_token, data?.user_id, now());
+        renewed.set(id, session);
+        if (renewed.size > MAX_SESSIONS) renewed.delete(renewed.keys().next().value);
+        renewFailed.delete(id);
+        return session;
+      } catch (error) {
+        renewed.delete(id);
+        const message = error instanceof ServiceError
+          ? `官网自动重新登录失败：${error.message}`
+          : '官网自动重新登录失败，请手动重新登录 V2code 插件；模型 Key 不受影响';
+        // A canceled caller is not a refused login; do not start a cooldown.
+        if (!signal?.aborted) {
+          renewFailed.set(id, { until: now() + RENEW_COOLDOWN_MS, message });
+          if (renewFailed.size > MAX_SESSIONS) renewFailed.delete(renewFailed.keys().next().value);
+        }
+        throw new ServiceError(message);
+      }
+    })();
+    renewing.set(id, pending);
+    return pending.finally(() => renewing.delete(id));
+  }
+
+  async function readUsage(auth, signal) {
+    apiKey(auth);
+    const metadata = auth.metadata;
+    const credentials = renewalOf(metadata);
+    const expectedUser = metadata?.webUserId;
+    const sessionOf = async () => {
+      const cached = credentials && renewed.get(credentialId(credentials));
+      // Renew a minute early so a request does not race the token's expiry.
+      if (cached && cached.expires - 60000 > now()) return cached;
+      try { return webSession(metadata?.webToken, expectedUser, now()); }
+      catch (error) {
+        if (!credentials) throw error;
+        return renewSession(credentials, signal);
+      }
+    };
+    let session = await sessionOf();
+    if (credentials && expectedUser != null && String(expectedUser) !== session.userId) {
+      throw new ServiceError('官网用户 ID 与登录令牌不匹配');
+    }
+    try { return await queryBalance(session, signal); }
+    catch (error) {
+      if (!credentials || !(error instanceof ServiceError) || !error.authRejected) throw error;
+      renewed.delete(credentialId(credentials));
+      session = await renewSession(credentials, signal);
+      if (expectedUser != null && String(expectedUser) !== session.userId) throw new ServiceError('官网用户 ID 与登录令牌不匹配');
+      return queryBalance(session, signal);
+    }
   }
 
   async function siteRequest(url, body, session, label, signal) {
@@ -237,12 +322,14 @@ function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
       }
       throw new ServiceError('Key 列表分页过多，请在官网整理后重试');
     },
-    async complete(session, selected, signal) {
+    async complete(session, selected, signal, remembered) {
       const metadata = { webToken: session.token, webUserId: session.userId, keyId: selected.id, keyName: selected.name, keyGroup: selected.group };
+      // Only present when the reader ticked the box on the local page.
+      if (remembered) { metadata.webUsername = remembered.username; metadata.webPassword = remembered.password; }
       await readUsage({ type: 'api', key: selected.key, metadata }, signal);
       return { type: 'success', key: selected.key, metadata };
     },
-    errorMessage(error) { return error instanceof ServiceError ? error.message : 'V2code 登录暂时失败，请返回重试；账号密码未保存'; },
+    errorMessage(error) { return error instanceof ServiceError ? error.message : 'V2code 登录暂时失败，请返回重试；本次未保存账号密码'; },
   };
 
   return {

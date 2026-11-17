@@ -72,7 +72,7 @@ test('invalid credentials fail login without network calls', async () => {
 });
 
 test('JWT structural validation rejects wrong accounts, expiry, and mismatched ids', () => {
-  assert.deepEqual(webSession(jwt(), '123', NOW), { token: jwt(), userId: '123' });
+  assert.deepEqual(webSession(jwt(), '123', NOW), { token: jwt(), userId: '123', expires: (NOW / 1000 + 86400) * 1000 });
   for (const token of [jwt({ exp: NOW / 1000 }), jwt({ exp: 'future' }), jwt({ exp: null }), jwt({ exp: 0 }), jwt({ account_id: '' }), jwt({ account_id: '123\n' }), jwt({ account_type: 'model' }), jwt({}, { alg: 'none' }), 'eyJbroken.payload.signature', `Bearer ${jwt()}`, jwt() + '\nheader', 'a'.repeat(9000)]) {
     assert.throws(() => webSession(token, undefined, NOW));
   }

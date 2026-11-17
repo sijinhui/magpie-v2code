@@ -142,4 +142,33 @@ await import(${JSON.stringify(pathToFileURL(host).href)});
   assert.equal(browserSaved.includes('fake-password'), false);
   assert.equal(browserSaved.includes('fake-user'), false);
   assert.equal(browserSaved.includes('unselected-secret'), false);
+  assert.equal(finalAuth.metadata.webPassword, undefined, 'not ticked: no password is kept');
+
+  // Ticked: the account and password are kept in the account's metadata and
+  // an expired website token is renewed from them. The fake website accepts
+  // only these fake credentials, so any other path fails the run.
+  const again = await rpc('authorize', { provider: 'v2code', method: 0, account: login.account });
+  const againPage = await (await fetch(again.url)).text();
+  assert.match(againPage, /name="remember" type="checkbox" value="1"/);
+  const againCsrf = /name="csrf" value="([^"]+)"/.exec(againPage)[1];
+  const againHeaders = { origin: new URL(again.url).origin, 'content-type': 'application/x-www-form-urlencoded' };
+  const againOptions = await (await fetch(again.url + '/login', { method: 'POST', headers: againHeaders, body: new URLSearchParams({ csrf: againCsrf, username: 'fake-user', password: 'fake-password', remember: '1' }) })).text();
+  const againSelection = /<option value="([a-f0-9]+)">/.exec(againOptions)[1];
+  assert.equal(againOptions.includes('fake-password'), false);
+  const againDone = rpc('callback', { session: again.session });
+  assert.equal((await fetch(again.url + '/select', { method: 'POST', headers: againHeaders, body: new URLSearchParams({ csrf: againCsrf, selection: againSelection }) })).status, 200);
+  assert.equal((await againDone).ok, true);
+  const rememberedAuth = JSON.parse(await readFile(authPath, 'utf8'))[login.account];
+  assert.equal(rememberedAuth.metadata.webUsername, 'fake-user');
+  assert.equal(rememberedAuth.metadata.webPassword, 'fake-password');
+
+  // Expire the saved token on disk, then read the balance: the plugin must log
+  // in again with the saved credentials rather than report a sign-in problem.
+  const expired = { ...JSON.parse(await readFile(authPath, 'utf8')) };
+  expired[login.account].metadata.webToken = `${encode({ alg: 'HS256' })}.${encode({ account_type: 'app_admin', account_id: '123', exp: Math.floor(Date.now() / 1000) - 60 })}.fake-signature`;
+  await writeFile(authPath, JSON.stringify(expired));
+  const renewed = await rpc('usage', { provider: 'v2code', account: login.account });
+  assert.equal(renewed.error, '');
+  assert.equal(renewed.balance, '123.45');
+  assert.equal(renewed.windows[1].name, '今日用量');
 });

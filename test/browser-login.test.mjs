@@ -92,6 +92,58 @@ test('oversized forms are rejected before credentials reach the service', async 
   assert.equal(calls.length, 0);
 });
 
+async function chooseKey(context, remember) {
+  const completions = [];
+  const { submit, flow } = await setup(context, {
+    async complete(session, selected, _signal, remembered) {
+      completions.push(remembered);
+      return { type: 'success', key: selected.key, metadata: { webToken: session.token } };
+    },
+  });
+  const values = { username: 'site-user', password: 'site-secret-password', ...(remember ? { remember: '1' } : {}) };
+  const content = await (await submit('/login', values)).text();
+  const selection = /<option value="([a-f0-9]+)">/.exec(content)[1];
+  const done = flow.callback();
+  assert.equal((await submit('/select', { selection })).status, 200);
+  await done;
+  return { completions, content };
+}
+
+test('login page offers an unticked remember box with a plaintext warning', async context => {
+  const { content } = await setup(context);
+  assert.match(content, /name="remember" type="checkbox" value="1"/);
+  assert.equal(/name="remember"[^>]*checked/.test(content), false, 'never ticked by default');
+  assert.match(content, /明文/);
+});
+
+test('password is passed to completion only when the box was ticked', async context => {
+  const ticked = await chooseKey(context, true);
+  assert.deepEqual(ticked.completions, [{ username: 'site-user', password: 'site-secret-password' }]);
+  const unticked = await chooseKey(context, false);
+  assert.deepEqual(unticked.completions, [undefined]);
+  assert.equal(unticked.content.includes('site-secret-password'), false);
+});
+
+test('a remembered password never reaches the selection page', async context => {
+  const { content } = await chooseKey(context, true);
+  assert.equal(content.includes('site-secret-password'), false);
+  assert.equal(content.includes('site-user'), false);
+});
+
+test('a failed or canceled sign-in forgets a ticked password', { timeout: 5000 }, async context => {
+  const seen = [];
+  const { submit, controller, flow } = await setup(context, {
+    async complete(_session, _selected, _signal, remembered) { seen.push(remembered); return { type: 'success', key: key.key }; },
+    async listKeys() { return [key]; },
+  });
+  const content = await (await submit('/login', { username: 'site-user', password: 'site-secret-password', remember: '1' })).text();
+  const selection = /<option value="([a-f0-9]+)">/.exec(content)[1];
+  controller.abort();
+  assert.equal((await flow.callback()).type, 'failed');
+  await submit('/select', { selection }).catch(() => {});
+  assert.deepEqual(seen, [], 'nothing completes after cancel, so nothing carries the password');
+});
+
 test('cancel during website login prevents the later Key-list step', { timeout: 5000 }, async context => {
   const started = deferred(), ready = deferred();
   context.after(() => ready.resolve());

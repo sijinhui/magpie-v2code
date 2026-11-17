@@ -29,6 +29,9 @@ export async function beginBrowserSignIn(service, { signal, ttlMs = 300000 } = {
   const csrf = randomBytes(24).toString('hex');
   const controller = new AbortController();
   let session;
+  // Held only between the login and the key selection, and only when the
+  // reader ticked the box. Cleared on every failure, cancel and finish.
+  let remembered;
   let choices = new Map();
   let busy = false;
   let finished = false;
@@ -38,7 +41,7 @@ export async function beginBrowserSignIn(service, { signal, ttlMs = 300000 } = {
   const outcome = new Promise(resolve => { settle = resolve; });
   const removers = [];
   const hidden = `<input type="hidden" name="csrf" value="${csrf}">`;
-  const loginPage = error => page(`<p>使用官网账号登录，然后手动选择一个已有 API Key。</p><form method="post" action="${path}/login">${hidden}<label for="username">官网账号</label><input id="username" name="username" autocomplete="username" required maxlength="200"><label for="password">官网密码</label><input id="password" name="password" type="password" autocomplete="off" required maxlength="4096"><button type="submit">登录并读取 Key 列表</button></form><p class="note">账号密码仅发送至 <strong>https://www.v2code.ai</strong>。密码不落盘、不写入 Magpie 账号；只保存最终选中的模型 Key 和官网登录令牌。此本机页面 5 分钟内有效。</p>`, error);
+  const loginPage = error => page(`<p>使用官网账号登录，然后手动选择一个已有 API Key。</p><form method="post" action="${path}/login">${hidden}<label for="username">官网账号</label><input id="username" name="username" autocomplete="username" required maxlength="200"><label for="password">官网密码</label><input id="password" name="password" type="password" autocomplete="off" required maxlength="4096"><label class="check"><input name="remember" type="checkbox" value="1" style="width:auto;margin:0 8px 0 0">保存官网账号密码，在官网令牌过期时自动重新登录（默认不勾选）</label><p class="note warn">勾选后，账号和密码会以明文保存在 Magpie 的本机账号文件中，任何能读取该文件的程序都能获得官网密码。官网要求验证码或二次验证时自动登录会失败。不勾选则不保存。</p><button type="submit">登录并读取 Key 列表</button></form><p class="note">账号密码仅发送至 <strong>https://www.v2code.ai</strong>。默认不保存密码；只保存最终选中的模型 Key 和官网登录令牌。此本机页面 5 分钟内有效。</p>`, error);
   const selectPage = () => page(`<p>已登录。请选择要交给 Magpie 使用的 Key：</p><form method="post" action="${path}/select">${hidden}<label for="selection">API Key（名称 · 分组 · 尾号）</label><select id="selection" name="selection" required><option value="" disabled selected>请手动选择一个 Key</option>${[...choices].map(([id, choice]) => `<option value="${id}">${html(choice.name)} · ${html(choice.group)} · …${html(choice.key.slice(-4))}</option>`).join('')}</select><button type="submit">使用选中的 Key</button></form><p class="note">只显示启用、未过期且有可用额度的 Key，不会创建、修改或删除 Key。官网余额是整个账号的余额，不等于某个 Key 的限额。</p>`);
   const send = (response, status, body) => {
     response.writeHead(status, {
@@ -60,6 +63,7 @@ export async function beginBrowserSignIn(service, { signal, ttlMs = 300000 } = {
     controller.abort();
     choices.clear();
     session = undefined;
+    remembered = undefined;
     server.close();
     server.closeIdleConnections?.();
     server.closeAllConnections?.();
@@ -103,11 +107,13 @@ export async function beginBrowserSignIn(service, { signal, ttlMs = 300000 } = {
           return send(response, 400, loginPage('请填写有效的官网账号和密码'));
         }
         const authenticated = await service.login(username, password, controller.signal);
+        const remember = form.get('remember') === '1';
         form.delete('password');
         if (finished) return;
         const keys = await service.listKeys(authenticated, controller.signal);
         if (finished) return;
         session = authenticated;
+        remembered = remember ? { username, password } : undefined;
         choices = new Map(keys.map(choice => [randomBytes(16).toString('hex'), choice]));
         if (!choices.size) throw Error('empty key list');
         return send(response, 200, selectPage());
@@ -119,10 +125,12 @@ export async function beginBrowserSignIn(service, { signal, ttlMs = 300000 } = {
         if (finished) return;
         if (!current) {
           session = undefined;
+          remembered = undefined;
           choices.clear();
           return send(response, 409, loginPage('所选 Key 已失效或发生变化，请重新登录并选择'));
         }
-        const result = await service.complete(session, current, controller.signal);
+        const result = await service.complete(session, current, controller.signal, remembered);
+        remembered = undefined;
         if (finished) return;
         response.once('finish', () => finish(result));
         return send(response, 200, page('<h2>已完成选择</h2><p>请返回 Magpie 等待登录完成。现在可以关闭此页面。</p>'));
@@ -131,6 +139,7 @@ export async function beginBrowserSignIn(service, { signal, ttlMs = 300000 } = {
     } catch (error) {
       if (!finished) {
         session = undefined;
+        remembered = undefined;
         choices.clear();
         send(response, 400, loginPage(service.errorMessage(error)));
       }
@@ -153,7 +162,7 @@ export async function beginBrowserSignIn(service, { signal, ttlMs = 300000 } = {
   return {
     url: origin + path,
     method: 'auto',
-    instructions: '在打开的本机页面输入 V2code 官网账号密码，登录后手动选择一个 Key；密码不保存。',
+    instructions: '在打开的本机页面输入 V2code 官网账号密码，登录后手动选择一个 Key；默认不保存密码，仅在你勾选“保存官网账号密码”时保存并用于令牌过期后的自动续登。',
     async callback(code, options = {}) {
       watch(options.signal);
       return outcome;

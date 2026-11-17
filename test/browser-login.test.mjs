@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { setImmediate } from 'node:timers/promises';
 import { beginBrowserSignIn } from '../browser-login.mjs';
 
 const key = { id: '123', name: '<script>name</script>', group: 'cc_plus', key: 'sk-private-key-1234' };
+const deferred = () => {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+};
 
 async function setup(context, overrides = {}, options = {}) {
   const calls = [];
@@ -84,6 +90,54 @@ test('oversized forms are rejected before credentials reach the service', async 
   const { submit, calls } = await setup(context);
   assert.equal((await submit('/login', { username: 'account', password: 'a'.repeat(17000) })).status, 400);
   assert.equal(calls.length, 0);
+});
+
+test('cancel during website login prevents the later Key-list step', { timeout: 5000 }, async context => {
+  const started = deferred(), ready = deferred();
+  context.after(() => ready.resolve());
+  let listings = 0;
+  const { submit, controller, flow } = await setup(context, {
+    async login() {
+      started.resolve();
+      await ready.promise; // Deliberately ignore abort to simulate a late response.
+      return { token: 'private-jwt', userId: '123' };
+    },
+    async listKeys() { listings++; return [key]; },
+  });
+  const pending = submit('/login', { username: 'account', password: 'private' })
+    .then(response => response.text()).catch(error => error);
+  await started.promise;
+  controller.abort();
+  assert.equal((await flow.callback()).type, 'failed');
+  ready.resolve();
+  await pending;
+  await setImmediate();
+  assert.equal(listings, 0, 'a late login response cannot start a Key-list request');
+  await assert.rejects(fetch(flow.url));
+});
+
+test('cancel during Key revalidation prevents login completion', { timeout: 5000 }, async context => {
+  const started = deferred(), ready = deferred();
+  context.after(() => ready.resolve());
+  let listings = 0, completions = 0;
+  const { submit, controller, flow } = await setup(context, {
+    async listKeys() {
+      if (++listings === 2) { started.resolve(); await ready.promise; }
+      return [key];
+    },
+    async complete() { completions++; return { type: 'success', key: key.key }; },
+  });
+  const content = await (await submit('/login', { username: 'account', password: 'private' })).text();
+  const selection = /<option value="([a-f0-9]+)">/.exec(content)[1];
+  const pending = submit('/select', { selection }).then(response => response.text()).catch(error => error);
+  await started.promise;
+  controller.abort();
+  assert.equal((await flow.callback()).type, 'failed');
+  ready.resolve();
+  await pending;
+  await setImmediate();
+  assert.equal(completions, 0, 'a late Key list cannot trigger balance validation or save credentials');
+  await assert.rejects(fetch(flow.url));
 });
 
 test('cancel and timeout both close the local server without returning credentials', async context => {

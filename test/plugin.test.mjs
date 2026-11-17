@@ -4,7 +4,7 @@ import V2codePlugin, { _internal } from '../index.mjs';
 
 const { createPlugin, webSession, usageOf, queryWindow, keysOf, RESPONSES_API, ANTHROPIC_API, BALANCE_URL, LOGIN_URL, KEYS_URL } = _internal;
 const NOW = Date.parse('2026-11-13T22:00:00+08:00');
-const info = { quota: 123.45, used_quota: 67.89, private_field: 'must-not-escape' };
+const info = { quota: 123.45, used_quota: 67.89, statistics_quota: 4.56, private_field: 'must-not-escape' };
 const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
 const jwt = (claims = {}, header = { alg: 'HS256', typ: 'JWT' }) => `${encode(header)}.${encode({ account_type: 'app_admin', account_id: '123', exp: NOW / 1000 + 86400, ...claims })}.test-signature`;
 const auth = (metadata = { webToken: jwt(), webUserId: '123' }, key = 'sk-test-only') => async () => ({ type: 'api', key, metadata });
@@ -88,9 +88,13 @@ test('wallet reports prepaid balance, not a fictional quota percentage or reset'
   assert.equal(usage.windows[0].used, undefined);
   assert.equal(usage.windows[0].limit, undefined);
   assert.equal(usage.windows[0].resetsAt, undefined);
-  assert.equal(usage.windows[1].amount, 67.89);
+  assert.equal(usage.windows[1].name, '今日用量');
+  assert.equal(usage.windows[1].amount, 4.56);
   assert.equal(usage.windows[1].aside, true);
-  assert.match(usage.windows[1].display, /191\.34/);
+  assert.equal(usage.windows[1].display, '今日已用 4.56 额度');
+  assert.equal(usage.windows[2].amount, 67.89);
+  assert.equal(usage.windows[2].aside, true);
+  assert.match(usage.windows[2].display, /191\.34/);
   assert.equal(usage.until, undefined);
   assert.equal(usage.signIn, 'kept');
   assert.equal(JSON.stringify(usage).includes('must-not-escape'), false);

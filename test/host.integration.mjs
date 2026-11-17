@@ -32,7 +32,7 @@ globalThis.fetch = async (input, init = {}) => {
   if (url === 'https://dev.v2code.ai/v1/models') return Response.json({ data: [{ id: 'gpt-6-astra' }, { id: 'claude-opus-5-5' }] });
   if (url === 'https://www.v2code.ai/api/v1/app_admin/user/data') {
     if (!String(new Headers(init.headers).get('authorization')).startsWith('eyJ') || new Headers(init.headers).get('user-id') !== '123') throw Error('missing fake website auth');
-    return Response.json({ status: 0, data: { quota: 123.45, used_quota: 67.89 } });
+    return Response.json({ status: 0, data: { quota: 123.45, used_quota: 67.89, statistics_quota: 4.56 } });
   }
   throw Error('integration test refused unexpected network request');
 };
@@ -103,7 +103,14 @@ await import(${JSON.stringify(pathToFileURL(host).href)});
   assert.equal(usage.balance, '123.45');
   assert.equal(usage.windows[0].balance, 123.45);
   assert.equal(usage.windows[0].used, null);
+  assert.equal(usage.windows[1].name, '今日用量');
+  assert.equal(usage.windows[1].amount, 4.56);
+  assert.equal(usage.windows[1].display, '今日已用 4.56 额度');
+  assert.equal(usage.windows[1].unit, '额度');
+  assert.equal(usage.windows[1].used, null);
   assert.equal(usage.windows[1].aside, true);
+  assert.equal(usage.windows[2].name, '累计使用');
+  assert.equal(usage.windows[2].amount, 67.89);
   assert.equal(usage.signIn, 'kept');
   assert.equal(JSON.stringify(usage).includes(token), false);
   const load = await rpc('load', { provider: 'v2code', account: login.account });

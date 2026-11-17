@@ -90,6 +90,7 @@ export async function beginBrowserSignIn(service, { signal, ttlMs = 300000 } = {
     let form;
     try { form = await formOf(request); }
     catch { return send(response, 400, page('<p>登录表单无效或过大。</p>')); }
+    if (finished) return;
     if (form.get('csrf') !== csrf) return send(response, 403, page('<p>登录校验失败，请重新打开登录页。</p>'));
     if (busy) return send(response, 409, page('<p>正在处理上一次请求，请勿重复提交。</p>'));
     busy = true;
@@ -103,6 +104,7 @@ export async function beginBrowserSignIn(service, { signal, ttlMs = 300000 } = {
         }
         const authenticated = await service.login(username, password, controller.signal);
         form.delete('password');
+        if (finished) return;
         const keys = await service.listKeys(authenticated, controller.signal);
         if (finished) return;
         session = authenticated;
@@ -114,6 +116,7 @@ export async function beginBrowserSignIn(service, { signal, ttlMs = 300000 } = {
         const selected = choices.get(form.get('selection'));
         if (!session || !selected) return send(response, 400, page('<p>未选择有效的 Key，请返回登录页选择。</p>'));
         const current = (await service.listKeys(session, controller.signal)).find(choice => choice.id === selected.id && choice.key === selected.key);
+        if (finished) return;
         if (!current) {
           session = undefined;
           choices.clear();

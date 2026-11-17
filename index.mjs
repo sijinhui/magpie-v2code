@@ -69,6 +69,13 @@ function usageOf(data) {
   const remaining = safeNumber(data?.quota, 'quota');
   const used = safeNumber(data?.used_quota, 'used_quota');
   if (used < 0 || !Number.isFinite(remaining + used)) throw new ServiceError('余额回复的累计额度无效');
+  // The website's selected-range spend is statistics_quota, not the
+  // lifetime used_quota. A missing daily statistic must not hide the wallet.
+  let today;
+  try {
+    const value = safeNumber(data?.statistics_quota, 'statistics_quota');
+    if (value >= 0) today = value;
+  } catch { /* Keep unknown statistics distinct from a known zero. */ }
   return {
     plan: 'V2code 预付额度',
     balance: remaining.toFixed(2),
@@ -77,6 +84,12 @@ function usageOf(data) {
       balance: remaining,
       unit: '额度',
       display: `剩余 ${remaining.toFixed(2)} 额度`,
+    }, {
+      name: '今日用量',
+      ...(today !== undefined ? { amount: today } : {}),
+      unit: '额度',
+      display: today !== undefined ? `今日已用 ${today.toFixed(2)} 额度` : '今日用量暂不可用',
+      aside: true,
     }, {
       name: '累计使用',
       amount: used,
@@ -157,9 +170,11 @@ async function readJson(response, label) {
 function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   async function request(url, init, label, signal) {
     try {
+      signal?.throwIfAborted();
       const timeout = AbortSignal.timeout(20000);
       const response = await fetchImpl(url, {
         ...init,
+        credentials: 'omit',
         redirect: 'error',
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       });
@@ -288,7 +303,12 @@ function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
             if ((!responses && !messages) || url.username || url.password || url.hash || url.search || method !== 'POST') {
               throw new ServiceError('V2code 插件拒绝向未知地址、协议端点或接口发送模型密钥');
             }
+            const signal = request?.signal ?? init.signal;
+            signal?.throwIfAborted();
             const key = apiKey(await getAuth());
+            // Auth loading may await disk I/O. A canceled request must not
+            // start a billed generation when that read finishes.
+            signal?.throwIfAborted();
             const headers = new Headers(request ? request.headers : init.headers);
             for (const name of [...headers.keys()]) {
               if (['authorization', 'x-api-key', 'cookie', 'cookie2', 'user-id', 'host', 'content-length', 'origin', 'referer', 'proxy-authorization', 'x-auth-token', 'x-access-token'].includes(name)
@@ -299,7 +319,7 @@ function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
               headers.set('x-api-key', key);
               if (!headers.has('anthropic-version')) headers.set('anthropic-version', '2023-06-01');
             }
-            const options = { ...init, method, headers, redirect: 'error', signal: request?.signal ?? init.signal };
+            const options = { ...init, method, headers, credentials: 'omit', redirect: 'error', signal };
             if (request) options.body = request.body;
             if (options.body instanceof ReadableStream) options.duplex = 'half';
             return fetchImpl(url.href, options);
@@ -325,13 +345,14 @@ function createPlugin({ fetchImpl = globalThis.fetch, now = Date.now } = {}) {
         for (const item of result.data) {
           if (typeof item?.id !== 'string' || !MODEL_ID.test(item.id)) continue;
           const id = item.id;
-          const previous = provider.models?.[id] ?? {};
+          const previous = Object.hasOwn(provider.models ?? {}, id) ? (provider.models[id] ?? {}) : {};
           const endpoint = endpointOf(id);
+          const name = [item.name, previous.name, id].find(value => typeof value === 'string' && value.trim());
           models[id] = {
             ...previous,
             id,
             providerID: PROVIDER,
-            name: typeof item.name === 'string' ? item.name.slice(0, 200) : previous.name ?? id,
+            name: name.slice(0, 200),
             status: 'active',
             api: { id, url: endpoint.api, npm: endpoint.npm },
             limit: previous.limit ?? { context: 0, output: 0 },
